@@ -5,11 +5,13 @@ from open_endurance_coach.config import (
     PROVIDER_DEFAULT_MODELS,
     PROVIDERS,
     Settings,
+    effective_input_budget,
     resolved_context_window,
+    resolved_input_room,
     resolved_max_output_tokens,
     validate_llm_limits,
 )
-from open_endurance_coach.tokens import BUDGET_SAFETY_MARGIN, INPUT_TOKEN_CEILING
+from open_endurance_coach.tokens import BUDGET_SAFETY_MARGIN
 
 
 def test_defaults(settings: Settings) -> None:
@@ -222,11 +224,61 @@ def test_validate_llm_limits_accepts_defaults() -> None:
     validate_llm_limits(Settings(intervals_api_key="k", _env_file=None))
 
 
-def test_llm_input_budget_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert Settings(intervals_api_key="k", _env_file=None).llm_input_budget == INPUT_TOKEN_CEILING
+def test_llm_input_budget_is_unset_by_default_and_env_settable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings(intervals_api_key="k", _env_file=None).llm_input_budget is None
     monkeypatch.setenv("LLM_INPUT_BUDGET", "12345")
     assert Settings(intervals_api_key="k", _env_file=None).llm_input_budget == 12345
 
 
 def test_budget_safety_margin_is_a_tunable_constant() -> None:
     assert BUDGET_SAFETY_MARGIN == 0.2
+
+
+def test_effective_input_budget_defaults_to_the_model_window() -> None:
+    ovh = Settings(intervals_api_key="k", _env_file=None)
+    assert effective_input_budget(ovh) == 176948
+    deepseek = Settings(
+        intervals_api_key="k", deepseek_api_key="k", llm_provider="deepseek", _env_file=None
+    )
+    assert effective_input_budget(deepseek) == 806093
+
+
+def test_resolved_input_room_ignores_the_soft_cap() -> None:
+    settings = Settings(intervals_api_key="k", llm_input_budget=500_000, _env_file=None)
+    assert resolved_input_room(settings) == 176948
+    assert effective_input_budget(settings) == 176948
+
+
+def test_effective_input_budget_caps_below_the_window() -> None:
+    ovh = Settings(intervals_api_key="k", llm_input_budget=500_000, _env_file=None)
+    assert effective_input_budget(ovh) == 176948
+    deepseek = Settings(
+        intervals_api_key="k",
+        deepseek_api_key="k",
+        llm_provider="deepseek",
+        llm_input_budget=500_000,
+        _env_file=None,
+    )
+    assert effective_input_budget(deepseek) == 500_000
+
+
+def test_effective_input_budget_rejects_a_reply_cap_above_the_model_output() -> None:
+    settings = Settings(
+        intervals_api_key="k",
+        deepseek_api_key="k",
+        llm_provider="deepseek",
+        llm_max_tokens=400_000,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="exceeds the output cap"):
+        effective_input_budget(settings)
+
+
+def test_too_small_window_has_no_input_room() -> None:
+    settings = Settings(
+        intervals_api_key="k", llm_context_window=10_000, llm_max_tokens=32768, _env_file=None
+    )
+    with pytest.raises(ValueError, match="no input room"):
+        effective_input_budget(settings)

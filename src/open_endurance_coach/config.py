@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from open_endurance_coach.tokens import INPUT_TOKEN_CEILING
+from open_endurance_coach.tokens import BUDGET_SAFETY_MARGIN
 
 _ATHLETE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 
@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     llm_thinking: bool = True
     llm_reasoning_effort: str | None = None
     llm_max_tokens: int = 32768
-    llm_input_budget: int = Field(default=INPUT_TOKEN_CEILING, ge=1)
+    llm_input_budget: int | None = Field(default=None, ge=1)
     llm_context_window: int | None = None
     llm_max_output_tokens: int | None = None
     llm_temperature: float | None = None
@@ -195,6 +195,31 @@ def validate_llm_limits(settings: Settings) -> None:
             f" {settings.llm_model!r} ({output}); lower LLM_MAX_TOKENS or set"
             " LLM_MAX_OUTPUT_TOKENS"
         )
+
+
+def resolved_input_room(settings: Settings) -> int:
+    """The model's usable window for input, before the optional soft cap is applied."""
+    window = resolved_context_window(settings)
+    output_reserve = min(settings.llm_max_tokens, resolved_max_output_tokens(settings))
+    return window - output_reserve - int(BUDGET_SAFETY_MARGIN * window)
+
+
+def effective_input_budget(settings: Settings) -> int:
+    """Input budget for one request, derived from the active model's window.
+
+    The target is the model's usable window. Set ``llm_input_budget`` to cap it lower; it can
+    never exceed the usable window, so a request always fits what the provider accepts.
+    """
+    validate_llm_limits(settings)
+    room = resolved_input_room(settings)
+    budget = room if settings.llm_input_budget is None else min(settings.llm_input_budget, room)
+    if budget < 1:
+        raise ValueError(
+            f"no input room for {settings.llm_model!r}: the model window leaves nothing for"
+            " input after the reply reserve and the safety margin; lower LLM_MAX_TOKENS, set"
+            " a larger LLM_CONTEXT_WINDOW, or select another model"
+        )
+    return budget
 
 
 @lru_cache

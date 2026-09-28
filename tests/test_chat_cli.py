@@ -13,12 +13,13 @@ from open_endurance_coach.chat.history import ChatSession
 from open_endurance_coach.cli import chat as cli_chat
 from open_endurance_coach.cli import main as cli_main
 from open_endurance_coach.clients.llm import LlmClient
-from open_endurance_coach.config import Settings
+from open_endurance_coach.config import Settings, effective_input_budget
 from open_endurance_coach.engine.coach import CoachEngine
 from open_endurance_coach.schemas.context import CoachContext
 from open_endurance_coach.schemas.decisions import DecisionReport
 from open_endurance_coach.store.db import CoachStore
 from open_endurance_coach.store.records import DraftStatus
+from open_endurance_coach.tokens import CHARS_PER_TOKEN
 from open_endurance_coach.writer.calendar import WriterError
 
 from .fakes import (
@@ -162,6 +163,7 @@ def test_chat_provider_command_switches_and_next_analysis_uses_it(
 def test_chat_model_command_sets_model(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, tmp_path: Path
 ) -> None:
+    settings = settings.model_copy(update={"llm_context_window": 100_000})
     fake = FakeLlmProvider([completion(report_json())])
     llm = LlmClient(
         settings.model_copy(update={"llm_provider": "fake"}),
@@ -1684,10 +1686,13 @@ def test_chat_race_delete_is_gated_and_written(patched: Any) -> None:
     assert calendar.deleted == ["136701474"]
 
 
-def test_chat_rejects_an_over_long_message_without_calling_the_llm(patched: Any) -> None:
+def test_chat_rejects_an_over_long_message_without_calling_the_llm(
+    patched: Any, settings: Settings
+) -> None:
     provider = FakeLlmProvider()
     patched(provider)
-    result = runner.invoke(cli_main.app, [], input=("x" * 100000) + "\n/exit\n")
+    over = "x" * ((effective_input_budget(settings) + 100) * CHARS_PER_TOKEN)
+    result = runner.invoke(cli_main.app, [], input=over + "\n/exit\n")
     assert result.exit_code == 0
     assert "message too long" in result.output
     assert provider.calls == []

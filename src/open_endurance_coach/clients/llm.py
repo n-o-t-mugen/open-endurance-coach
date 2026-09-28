@@ -120,11 +120,12 @@ class LlmClient:
     def model_name(self) -> str:
         return self._settings.llm_model
 
-    def select(self, *, provider: str | None = None, model: str | None = None) -> None:
+    def select(self, *, provider: str | None = None, model: str | None = None) -> Settings:
         if provider is not None and provider not in self._providers:
             available = describe_providers(self._providers, self._settings)
             raise LlmError(f"Unknown LLM provider: {provider!r}\nAvailable providers:\n{available}")
         self._settings = self._settings.with_llm_override(provider=provider, model=model)
+        return self._settings
 
     async def complete(
         self,
