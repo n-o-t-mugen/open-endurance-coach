@@ -410,9 +410,51 @@ def test_focus_limit_follows_the_selected_model(tmp_path: Path) -> None:
     assert engine.focus_limit() > ovh_limit
 
 
-def test_unknown_model_fails_for_the_budget(settings: Settings, tmp_path: Path) -> None:
+def test_history_budget_follows_the_selected_model(tmp_path: Path) -> None:
+    ovh = Settings(
+        intervals_api_key="k", deepseek_api_key="k", llm_input_budget=200_000, _env_file=None
+    )
+    llm = LlmClient(
+        ovh.model_copy(update={"llm_provider": "fake"}),
+        {"fake": FakeLlmProvider(), "deepseek": FakeLlmProvider()},
+        sleep=RecordingSleep(),
+    )
+    engine = CoachEngine(ovh, CoachStore(tmp_path / "coach.db"), make_intervals_client(), llm)
+    ovh_budget = engine.history_budget()
+    engine.select_llm(provider="deepseek")
+    assert engine.history_budget() > ovh_budget
+
+
+def test_history_budget_matches_focus_limit(settings: Settings, tmp_path: Path) -> None:
     engine = make_engine(settings, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
-    engine.select_llm(model="custom-model")
+    assert engine.history_budget() == engine.focus_limit()
+
+
+def test_a_budget_too_small_to_chat_is_reported(settings: Settings, tmp_path: Path) -> None:
+    tiny = settings.model_copy(update={"llm_input_budget": 5000})
+    engine = make_engine(tiny, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
+    with pytest.raises(ValueError, match="too small"):
+        engine.focus_limit()
+    with pytest.raises(ValueError, match="too small"):
+        engine.history_budget()
+
+
+def test_select_llm_rejects_an_unknown_model_without_switching(tmp_path: Path) -> None:
+    settings = Settings(intervals_api_key="k", deepseek_api_key="k", _env_file=None)
+    llm = LlmClient(
+        settings.model_copy(update={"llm_provider": "fake", "llm_model": "fake-model"}),
+        {"fake": FakeLlmProvider()},
+        sleep=RecordingSleep(),
+    )
+    engine = CoachEngine(settings, CoachStore(tmp_path / "coach.db"), make_intervals_client(), llm)
+    with pytest.raises(ValueError, match="LLM_CONTEXT_WINDOW"):
+        engine.select_llm(model="custom-model")
+    assert engine.llm_selection() == ("fake", "fake-model")
+
+
+def test_unknown_model_fails_for_the_budget(tmp_path: Path) -> None:
+    settings = Settings(intervals_api_key="k", llm_model="custom-model", _env_file=None)
+    engine = make_engine(settings, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
     with pytest.raises(ValueError, match="LLM_CONTEXT_WINDOW"):
         engine.focus_limit()
 
@@ -817,7 +859,9 @@ def test_engine_llm_selection_and_switch(settings: Settings, tmp_path: Path) -> 
     assert engine.llm_selection() == ("fake", "fake-model")
     assert engine.select_llm(provider="deepseek") == ("deepseek", "deepseek-flash")
     assert engine.llm_selection() == ("deepseek", "deepseek-flash")
-    assert engine.select_llm(model="custom-model") == ("deepseek", "custom-model")
+    with pytest.raises(ValueError, match="LLM_CONTEXT_WINDOW"):
+        engine.select_llm(model="custom-model")
+    assert engine.llm_selection() == ("deepseek", "deepseek-flash")
     store.close()
 
 

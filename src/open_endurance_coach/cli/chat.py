@@ -90,7 +90,9 @@ def _needs_fresh_context(focus: str, today: date | None) -> bool:
     return _REFRESH_RE.search(focus) is not None
 
 
-def _handle_llm_command(engine: CoachEngine, name: str, args: list[str]) -> None:
+def _handle_llm_command(
+    engine: CoachEngine, name: str, args: list[str], session: ChatSession
+) -> None:
     try:
         if args:
             if name == "provider":
@@ -99,6 +101,7 @@ def _handle_llm_command(engine: CoachEngine, name: str, args: list[str]) -> None
                 provider, model = engine.select_llm(model=args[0])
         else:
             provider, model = engine.llm_selection()
+        session.cap = engine.history_budget()
         console.print(f"[meta]Using {escape(provider)} ({escape(model)}).[/meta]")
     except RECOVERABLE_EXCEPTIONS as exc:
         print_error(exc)
@@ -266,7 +269,7 @@ async def _handle_proposal(
         elif name == "forget":
             console.print("[warn]/forget is unavailable while a proposal is open.[/warn]")
         elif name in {"provider", "model"}:
-            _handle_llm_command(engine, name, parts[1:])
+            _handle_llm_command(engine, name, parts[1:], session)
         else:
             console.print("[error]Unknown command.[/error]")
             console.print(HELP_TEXT, markup=False)
@@ -342,13 +345,14 @@ async def _run_command(
         console.print(f"Forgot {sum(removed.values())} records ({scope}).")
         return None
     if name in {"provider", "model"}:
-        _handle_llm_command(engine, name, args)
+        _handle_llm_command(engine, name, args, session)
         return None
     return None
 
 
 async def run_chat(engine: CoachEngine, settings: Settings) -> None:
-    session = ChatSession(cap=settings.chat_history_max_tokens)
+    cap = engine.history_budget()
+    session = ChatSession(cap=cap)
     if settings.history_days > 0:
         removed = engine.prune_history(settings.history_days)
         total = sum(removed.values())
@@ -371,7 +375,7 @@ async def run_chat(engine: CoachEngine, settings: Settings) -> None:
             settings.chat_history_turns,
             max_age_days=settings.chat_history_max_age_days,
         ),
-        max_tokens=settings.chat_history_max_tokens,
+        max_tokens=cap,
     )
     state = ChatState()
     remembered = sum(1 for turn in session.history if turn.role == "user")

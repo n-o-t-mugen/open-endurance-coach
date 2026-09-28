@@ -173,10 +173,19 @@ def test_chat_model_command_sets_model(
     engine = CoachEngine(settings, store, make_intervals_client(), llm)
     monkeypatch.setattr(cli_main, "_with_engine", FakeRunner(engine))
     monkeypatch.setattr(cli_main, "get_settings", lambda: settings)
+    captured: dict[str, Any] = {}
+
+    class _RecordingSession(ChatSession):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            captured["cap"] = self.cap
+
+    monkeypatch.setattr(cli_chat, "ChatSession", _RecordingSession)
     result = runner.invoke(cli_main.app, [], input="/model my-model\nanalyze my week\n/exit\n")
     assert result.exit_code == 0
     assert "Using fake (my-model)." in result.output
     assert fake.calls[-1]["model"] == "my-model"
+    assert captured["cap"] == engine.history_budget()
     store.close()
 
 
@@ -600,25 +609,21 @@ def test_chat_forget_wipes_stored_history_and_memory(patched: Any) -> None:
     assert drafts[0].focus.startswith("third")
 
 
-def test_chat_session_trims_to_cap(
-    patched: Any, monkeypatch: pytest.MonkeyPatch, settings: Settings
+def test_chat_session_cap_comes_from_the_budget(
+    patched: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = FakeLlmProvider([completion(report_json()) for _ in range(4)])
-    patched(provider)
-    monkeypatch.setattr(
-        cli_main,
-        "get_settings",
-        lambda: settings.model_copy(update={"chat_history_max_tokens": 100}),
-    )
-    result = runner.invoke(
-        cli_main.app,
-        [],
-        input=f"how was my week?\n{'A' * 4000}\n{'B' * 4000}\n{'C' * 4000}\n",
-    )
+    engine, _ = patched(FakeLlmProvider())
+    captured: dict[str, Any] = {}
+
+    class _RecordingSession(ChatSession):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            captured["cap"] = self.cap
+
+    monkeypatch.setattr(cli_chat, "ChatSession", _RecordingSession)
+    result = runner.invoke(cli_main.app, [], input="/exit\n")
     assert result.exit_code == 0
-    prompt = provider.calls[3]["messages"][1].content
-    assert "Recent conversation:" in prompt
-    assert "A" * 4000 not in prompt
+    assert captured["cap"] == engine.history_budget()
 
 
 def test_chat_shows_thinking_indicator(patched: Any) -> None:

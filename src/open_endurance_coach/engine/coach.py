@@ -434,6 +434,17 @@ class CoachEngine:
         """Max tokens a single athlete message may occupy in a request."""
         return self.input_room()
 
+    def history_budget(self) -> int:
+        """Tokens the in-session conversation may occupy.
+
+        The same room as the message: data and history share what is left after the system
+        prompt and the reserved data budget. It assumes the full data reserve and no current
+        message, so it is an upper bound: a very large message can make ``_fit_history`` trim
+        slightly earlier than this cap implies. ``_fit_history`` still trims to the exact
+        remainder per request, so this only bounds what the session keeps in memory.
+        """
+        return self.input_room()
+
     def check_focus(self, focus: str) -> None:
         """Reject a message too large to send, rather than truncating it silently."""
         limit = self.focus_limit()
@@ -453,6 +464,8 @@ class CoachEngine:
     def select_llm(
         self, *, provider: str | None = None, model: str | None = None
     ) -> tuple[str, str]:
+        candidate = self._llm_client.preview(provider=provider, model=model)
+        self._input_room_for(candidate)
         self._settings = self._llm_client.select(provider=provider, model=model)
         return self.llm_selection()
 
