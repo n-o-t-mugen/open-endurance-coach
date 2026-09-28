@@ -1,7 +1,15 @@
 import pytest
 from pydantic import ValidationError
 
-from open_endurance_coach.config import PROVIDER_DEFAULT_MODELS, Settings
+from open_endurance_coach.config import (
+    PROVIDER_DEFAULT_MODELS,
+    PROVIDERS,
+    Settings,
+    resolved_context_window,
+    resolved_max_output_tokens,
+    validate_llm_limits,
+)
+from open_endurance_coach.tokens import BUDGET_SAFETY_MARGIN, INPUT_TOKEN_CEILING
 
 
 def test_defaults(settings: Settings) -> None:
@@ -146,3 +154,79 @@ def test_athlete_id_accepts_supported_forms() -> None:
     assert explicit.intervals_athlete_id == "i12345"
     padded = Settings(intervals_api_key="k", intervals_athlete_id=" 0 ", _env_file=None)
     assert padded.intervals_athlete_id == "0"
+
+
+def test_provider_specs_declare_model_limits() -> None:
+    for spec in PROVIDERS.values():
+        assert spec.default_model
+        assert spec.context_window > 0
+        assert spec.max_output_tokens > 0
+
+
+def test_resolved_context_window_from_provider_defaults() -> None:
+    ovh = Settings(intervals_api_key="k", _env_file=None)
+    assert resolved_context_window(ovh) == 262144
+    deepseek = Settings(
+        intervals_api_key="k", deepseek_api_key="k", llm_provider="deepseek", _env_file=None
+    )
+    assert resolved_context_window(deepseek) == 1048576
+
+
+def test_resolved_context_window_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "1000")
+    settings = Settings(intervals_api_key="k", _env_file=None)
+    assert resolved_context_window(settings) == 1000
+
+
+def test_unknown_model_requires_context_window() -> None:
+    settings = Settings(intervals_api_key="k", llm_model="custom-model", _env_file=None)
+    with pytest.raises(ValueError, match="LLM_CONTEXT_WINDOW"):
+        resolved_context_window(settings)
+
+
+def test_unknown_model_with_context_window_resolves() -> None:
+    settings = Settings(
+        intervals_api_key="k", llm_model="custom-model", llm_context_window=200000, _env_file=None
+    )
+    assert resolved_context_window(settings) == 200000
+
+
+def test_resolved_max_output_tokens_from_registry_and_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(intervals_api_key="k", _env_file=None)
+    assert resolved_max_output_tokens(settings) == 262144
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "9000")
+    assert resolved_max_output_tokens(Settings(intervals_api_key="k", _env_file=None)) == 9000
+
+
+def test_unknown_model_without_output_override_keeps_reply_cap() -> None:
+    settings = Settings(intervals_api_key="k", llm_model="custom-model", _env_file=None)
+    assert resolved_max_output_tokens(settings) == settings.llm_max_tokens
+
+
+def test_validate_llm_limits_rejects_reply_above_output_cap() -> None:
+    settings = Settings(
+        intervals_api_key="k",
+        llm_model="custom-model",
+        llm_context_window=200000,
+        llm_max_output_tokens=8192,
+        llm_max_tokens=9000,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="LLM_MAX_TOKENS"):
+        validate_llm_limits(settings)
+
+
+def test_validate_llm_limits_accepts_defaults() -> None:
+    validate_llm_limits(Settings(intervals_api_key="k", _env_file=None))
+
+
+def test_llm_input_budget_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(intervals_api_key="k", _env_file=None).llm_input_budget == INPUT_TOKEN_CEILING
+    monkeypatch.setenv("LLM_INPUT_BUDGET", "12345")
+    assert Settings(intervals_api_key="k", _env_file=None).llm_input_budget == 12345
+
+
+def test_budget_safety_margin_is_a_tunable_constant() -> None:
+    assert BUDGET_SAFETY_MARGIN == 0.2

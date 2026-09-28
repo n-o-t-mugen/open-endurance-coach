@@ -13,6 +13,11 @@ CHARS_PER_TOKEN = 3
 # for several exchanges even when an open proposal inflates the context.
 INPUT_TOKEN_CEILING = 40960
 
+# Fraction of a model's window held back from the derived input budget. It must stay
+# larger than the tokenizer drift between providers (the same prompt costs Qwen about
+# 14% more tokens than DeepSeek). Adjust here in code.
+BUDGET_SAFETY_MARGIN = 0.2
+
 
 def estimate_text_tokens(text: str) -> int:
     return max(1, len(text) // CHARS_PER_TOKEN)
