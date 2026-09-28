@@ -234,16 +234,17 @@ Live probe with the production analysis prompt (`build_messages` over a standard
 | OVHcloud | `Qwen3.5-397B-A17B` | 2,187         | 7,025             | hidden; no `reasoning_content` or token detail                  | `stop`          |
 
 - Both providers accepted `max_tokens=65536` with no ceiling rejection.
-- **Minimum model window required (2026-09-20):** a request can legitimately reach
-  `INPUT_TOKEN_CEILING` = 40,960 input tokens (system prompt + athlete context + conversation
-  history), and the client reserves up to `LLM_MAX_TOKENS` = 32,768 for the reply, so a model used
-  with this tool must accept **at least ~41k input tokens and ideally ~74k in total**. Typical
-  requests are far smaller: a standard analysis measures ~2-3k prompt tokens with the current contract
-  (the probe above predates later contract additions) and a deep query with a
-  marathon's 43-row split table measures ~7k including the contract. For a model whose window is
-  smaller than ~74k, set `LLM_MAX_TOKENS` to `window − 40,960` (and lower the budgets if needed)
-  before using it, or a long question plus a large reply can be rejected by the provider. The
-  providers' windows are not recorded here; no code asserts a numeric window.
+- **Model windows and the derived input budget (2026-09-28):** the client knows the window and output cap
+  of each provider default (`Qwen3.5-397B-A17B`: 262,144 / 262,144; `deepseek-flash`: 1,048,576 /
+  393,216). The input budget is derived, not fixed:
+  `effective_input_budget = min(LLM_INPUT_BUDGET, window − min(LLM_MAX_TOKENS, max_output) − 20% window)`.
+  The 20% margin (`BUDGET_SAFETY_MARGIN`, a code constant) covers tokenizer drift between providers — in
+  the probe above the same prompt costs Qwen ~14% more tokens than DeepSeek. With `LLM_INPUT_BUDGET`
+  unset the budget is the model's usable window: **176,948 for OVH and 806,093 for DeepSeek**; set
+  `LLM_INPUT_BUDGET` to cap it lower. A model the app does not know **requires `LLM_CONTEXT_WINDOW`**
+  (and optionally `LLM_MAX_OUTPUT_TOKENS`); it is rejected without it rather than guessed. The budget is
+  a cap, not a spend: typical requests stay far smaller — a standard analysis measures ~2-3k prompt
+  tokens and a deep query with a marathon's 43-row split table ~7k including the contract.
 - **Provider flags are explicit capability flags, not shared assumptions:** DeepSeek receives the
   `thinking` flag (`enabled`/`disabled`); OVHcloud reasons server-side and never receives it. Neither
   provider is sent `reasoning_effort` until a live probe confirms it is accepted — setting
