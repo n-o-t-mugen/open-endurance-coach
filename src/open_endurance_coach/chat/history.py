@@ -31,6 +31,11 @@ def seed_turns(entries: list[FeedbackWithReport]) -> list[LlmMessage]:
     return turns
 
 
+def count_exchanges(turns: list[LlmMessage]) -> int:
+    """One exchange is one coach reply; multi-round drafts can add user turns without one."""
+    return sum(1 for turn in turns if turn.role == "assistant")
+
+
 def trim_history(turns: list[LlmMessage], max_tokens: int) -> list[LlmMessage]:
     if max_tokens < 1:
         raise ValueError(f"max_tokens must be positive: {max_tokens}")
@@ -68,6 +73,7 @@ class ChatSession:
     context: CoachContext | None = None
     cap: int | None = None
     pending_decision_id: int | None = None
+    notified: set[float] = field(default_factory=set)
 
     def seed(self, entries: list[FeedbackWithReport], *, max_tokens: int) -> None:
         self.history = trim_history(seed_turns(entries), max_tokens)

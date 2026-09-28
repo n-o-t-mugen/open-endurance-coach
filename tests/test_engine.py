@@ -1310,15 +1310,39 @@ async def test_full_history_drop_is_logged(
     provider = FakeLlmProvider([completion(report_json("ok"))])
     engine = make_engine(settings, store, provider)
     history = [
+        LlmMessage(role="user", content="old question"),
         LlmMessage(
-            role="user", content="x" * ((effective_input_budget(settings) + 1024) * CHARS_PER_TOKEN)
-        )
+            role="assistant",
+            content="x" * ((effective_input_budget(settings) + 1024) * CHARS_PER_TOKEN),
+        ),
     ]
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         await engine.analyze(
             "status", context=CoachContext(focus="status", max_tokens=200), history=history
         )
     assert "trimmed the conversation history" in caplog.text
+
+
+async def test_user_only_history_trim_is_logged(
+    settings: Settings, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    engine = make_engine(
+        settings,
+        CoachStore(tmp_path / "coach.db"),
+        FakeLlmProvider([completion(report_json("ok"))]),
+    )
+    history = [
+        LlmMessage(
+            role="user", content="x" * ((effective_input_budget(settings) + 1024) * CHARS_PER_TOKEN)
+        ),
+        LlmMessage(role="user", content="recent question"),
+        LlmMessage(role="assistant", content="recent answer"),
+    ]
+    with caplog.at_level("INFO"):
+        await engine.analyze(
+            "status", context=CoachContext(focus="status", max_tokens=200), history=history
+        )
+    assert "trimmed the oldest messages" in caplog.text
 
 
 def test_validate_report_rejects_placeholder_workout_duration() -> None:

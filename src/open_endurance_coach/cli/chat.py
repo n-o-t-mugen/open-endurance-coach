@@ -22,6 +22,7 @@ from open_endurance_coach.chat.gate import (
     is_exit_command,
 )
 from open_endurance_coach.chat.history import ChatSession, assistant_turn
+from open_endurance_coach.chat.memory import update_memory
 from open_endurance_coach.chat.state import ChatState
 from open_endurance_coach.cli.confirmation import Done, prompt_plan, respond
 from open_endurance_coach.cli.rendering import (
@@ -341,6 +342,7 @@ async def _run_command(
         if days is None:
             session.history = []
             session.context = None
+            session.notified.clear()
         scope = "all history" if days is None else f"history older than {days} days"
         console.print(f"Forgot {sum(removed.values())} records ({scope}).")
         return None
@@ -348,6 +350,13 @@ async def _run_command(
         _handle_llm_command(engine, name, args, session)
         return None
     return None
+
+
+def _report_memory(engine: CoachEngine, session: ChatSession) -> None:
+    """Warn as the conversation fills, then relieve it when it is nearly full."""
+    report = update_memory(session.history, cap=engine.history_budget(), notified=session.notified)
+    for notice in report.notices:
+        console.print(f"[meta]{escape(notice)}[/meta]")
 
 
 async def run_chat(engine: CoachEngine, settings: Settings) -> None:
@@ -378,12 +387,9 @@ async def run_chat(engine: CoachEngine, settings: Settings) -> None:
         max_tokens=cap,
     )
     state = ChatState()
-    remembered = sum(1 for turn in session.history if turn.role == "user")
     provider, model = engine.llm_selection()
     console.print("Chat with the coach. /help lists commands.")
     console.print(f"[meta]Using {escape(provider)} ({escape(model)}).[/meta]")
-    if remembered:
-        console.print(f"[meta]Remembering {remembered} past exchanges.[/meta]")
     while True:
         console.print()
         try:
@@ -427,6 +433,7 @@ async def run_chat(engine: CoachEngine, settings: Settings) -> None:
                     state = step
                 case Command(name=name, args=args):
                     state = await _run_command(engine, name, args, session) or state
+            _report_memory(engine, session)
         except InternalError:
             raise
         except Exception as exc:

@@ -576,12 +576,12 @@ def test_chat_startup_keeps_history_when_window_is_zero(
     )
     result = runner.invoke(cli_main.app, [], input="how was my week?\n")
     assert result.exit_code == 0
-    assert "Remembering 1 past exchange" in result.output
     assert "Pruned" not in result.output
+    assert "legs heavy" in provider.calls[0]["messages"][1].content
 
 
-def test_chat_shows_seeded_memory_count(patched: Any) -> None:
-    provider = FakeLlmProvider([completion(report_json()), completion(report_json())])
+def test_chat_does_not_announce_seeded_memory(patched: Any) -> None:
+    provider = FakeLlmProvider([completion(report_json())])
     _, store = patched(provider)
     draft_id = store.save_draft(
         focus="f",
@@ -589,10 +589,30 @@ def test_chat_shows_seeded_memory_count(patched: Any) -> None:
         context=CoachContext(focus="f"),
     )
     store.add_feedback(draft_id, "legs heavy")
-    store.add_feedback(draft_id, "slept badly")
-    result = runner.invoke(cli_main.app, [], input="how was my week?\nand today?\n")
+    result = runner.invoke(cli_main.app, [], input="/exit\n")
     assert result.exit_code == 0
-    assert "Remembering 2 past exchanges." in result.output
+    assert "Remembering" not in result.output
+
+
+def test_chat_warns_when_memory_is_filling(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, tmp_path: Path
+) -> None:
+    budget = 30_000
+    transcript_chars = 24_000
+    settings = settings.model_copy(update={"llm_input_budget": budget})
+    provider = FakeLlmProvider([completion(report_json())])
+    engine, store = make_engine(settings, tmp_path, provider)
+    draft_id = store.save_draft(
+        focus="f",
+        report=DecisionReport.model_validate(json.loads(report_json())),
+        context=CoachContext(focus="f"),
+    )
+    store.add_feedback(draft_id, "x" * transcript_chars)
+    monkeypatch.setattr(cli_main, "_with_engine", FakeRunner(engine))
+    monkeypatch.setattr(cli_main, "get_settings", lambda: settings)
+    result = runner.invoke(cli_main.app, [], input="how was my week?\n/exit\n")
+    assert result.exit_code == 0
+    assert "conversation memory" in result.output
 
 
 def test_chat_forget_wipes_stored_history_and_memory(patched: Any) -> None:

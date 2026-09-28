@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
+from open_endurance_coach.chat.history import count_exchanges
 from open_endurance_coach.clients.intervals import IntervalsApiError
 from open_endurance_coach.clients.llm import LlmClient, LlmError, LlmMessage
 from open_endurance_coach.clients.protocols import IntervalsReadClient
@@ -268,12 +269,16 @@ class CoachEngine:
         ordered = list(reversed(kept))
         while ordered and ordered[0].role == "assistant":
             ordered.pop(0)
-        if len(ordered) < len(history):
-            logger.warning(
-                "trimmed the conversation history from %d to %d turns for the context budget",
-                len(history),
-                len(ordered),
+        before = count_exchanges(history)
+        after = count_exchanges(ordered)
+        if after < before:
+            logger.info(
+                "trimmed the conversation history from %d to %d exchanges for the context budget",
+                before,
+                after,
             )
+        elif len(ordered) < len(history):
+            logger.info("trimmed the oldest messages from the conversation for the context budget")
         return ordered
 
     def _assert_within_ceiling(self, messages: list[LlmMessage]) -> None:
