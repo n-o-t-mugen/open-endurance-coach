@@ -52,7 +52,7 @@ def make_settings(**overrides: Any) -> Settings:
         "coach_tone": "Be strict and unforgiving.",
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(**values, _env_file=None)
 
 
 def test_messages_have_system_and_user_roles() -> None:

@@ -127,7 +127,7 @@ def test_prompt_includes_past_planned_events() -> None:
             ],
         }
     )
-    settings = Settings(intervals_api_key="k", deepseek_api_key="k")
+    settings = Settings(intervals_api_key="k", deepseek_api_key="k", _env_file=None)
     prompt = build_messages(context, settings)[1].content
     assert "Hill Sharpening 3x3m Z4-Z5 HR" in prompt
 
@@ -145,7 +145,7 @@ def test_sections_match_the_prompt_payload() -> None:
             "max_tokens": 4096,
         }
     )
-    settings = Settings(intervals_api_key="k", deepseek_api_key="k")
+    settings = Settings(intervals_api_key="k", deepseek_api_key="k", _env_file=None)
     user = build_messages(context, settings)[1].content
     start = user.index("<athlete_data>\n") + len("<athlete_data>\n")
     end = user.index("\n</athlete_data>")
