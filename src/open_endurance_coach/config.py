@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from open_endurance_coach.tokens import BUDGET_SAFETY_MARGIN
+
 _ATHLETE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 
 
@@ -14,11 +16,23 @@ _ATHLETE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 class ProviderSpec:
     default_model: str
     api_key_env: str | None
+    context_window: int
+    max_output_tokens: int
 
 
 PROVIDERS: dict[str, ProviderSpec] = {
-    "ovh": ProviderSpec(default_model="Qwen3.5-397B-A17B", api_key_env=None),
-    "deepseek": ProviderSpec(default_model="deepseek-flash", api_key_env="DEEPSEEK_API_KEY"),
+    "ovh": ProviderSpec(
+        default_model="Qwen3.5-397B-A17B",
+        api_key_env=None,
+        context_window=262144,
+        max_output_tokens=262144,
+    ),
+    "deepseek": ProviderSpec(
+        default_model="deepseek-flash",
+        api_key_env="DEEPSEEK_API_KEY",
+        context_window=1048576,
+        max_output_tokens=393216,
+    ),
 }
 
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
@@ -51,6 +65,9 @@ class Settings(BaseSettings):
     llm_thinking: bool = True
     llm_reasoning_effort: str | None = None
     llm_max_tokens: int = 32768
+    llm_input_budget: int | None = Field(default=None, ge=1)
+    llm_context_window: int | None = None
+    llm_max_output_tokens: int | None = None
     llm_temperature: float | None = None
     llm_timeout_seconds: float = 180.0
 
@@ -63,7 +80,6 @@ class Settings(BaseSettings):
     coach_tone: str = "Be objective, strict, and analytical. Do not offer generic encouragement."
 
     chat_history_turns: int = Field(default=10, ge=1)
-    chat_history_max_tokens: int = Field(default=16384, ge=1)
     chat_history_max_age_days: int = Field(default=90, ge=1)
     history_days: int = Field(default=180, ge=0)
 
@@ -135,6 +151,74 @@ def describe_providers(names: Iterable[str], settings: Settings) -> str:
         return "  (none configured)"
     width = max(len(name) for name, _ in rows)
     return "\n".join(f"  {name:<{width}}  {status}" for name, status in rows)
+
+
+def _provider_default_spec(settings: Settings) -> ProviderSpec | None:
+    """The spec whose limits apply, only when the active model is the provider default."""
+    spec = PROVIDERS.get(settings.llm_provider)
+    if spec is not None and settings.llm_model == spec.default_model:
+        return spec
+    return None
+
+
+def resolved_context_window(settings: Settings) -> int:
+    """The active model's input window, from provider settings or an explicit override."""
+    if settings.llm_context_window is not None:
+        return settings.llm_context_window
+    spec = _provider_default_spec(settings)
+    if spec is None:
+        raise ValueError(f"unknown model {settings.llm_model!r}: set LLM_CONTEXT_WINDOW to use it")
+    return spec.context_window
+
+
+def resolved_max_output_tokens(settings: Settings) -> int:
+    """The active model's output cap, from provider settings or an explicit override.
+
+    A model that is not a provider default has no known output cap, so the configured
+    reply cap is returned as the only bound we can honour.
+    """
+    if settings.llm_max_output_tokens is not None:
+        return settings.llm_max_output_tokens
+    spec = _provider_default_spec(settings)
+    if spec is None:
+        return settings.llm_max_tokens
+    return spec.max_output_tokens
+
+
+def validate_llm_limits(settings: Settings) -> None:
+    """Fail fast when the reply cap exceeds the active model's output cap."""
+    output = resolved_max_output_tokens(settings)
+    if settings.llm_max_tokens > output:
+        raise ValueError(
+            f"LLM_MAX_TOKENS={settings.llm_max_tokens} exceeds the output cap of"
+            f" {settings.llm_model!r} ({output}); lower LLM_MAX_TOKENS or set"
+            " LLM_MAX_OUTPUT_TOKENS"
+        )
+
+
+def resolved_input_room(settings: Settings) -> int:
+    """The model's usable window for input, before the optional soft cap is applied."""
+    window = resolved_context_window(settings)
+    output_reserve = min(settings.llm_max_tokens, resolved_max_output_tokens(settings))
+    return window - output_reserve - int(BUDGET_SAFETY_MARGIN * window)
+
+
+def effective_input_budget(settings: Settings) -> int:
+    """Input budget for one request, derived from the active model's window.
+
+    The target is the model's usable window. Set ``llm_input_budget`` to cap it lower; it can
+    never exceed the usable window, so a request always fits what the provider accepts.
+    """
+    validate_llm_limits(settings)
+    room = resolved_input_room(settings)
+    budget = room if settings.llm_input_budget is None else min(settings.llm_input_budget, room)
+    if budget < 1:
+        raise ValueError(
+            f"no input room for {settings.llm_model!r}: the model window leaves nothing for"
+            " input after the reply reserve and the safety margin; lower LLM_MAX_TOKENS, set"
+            " a larger LLM_CONTEXT_WINDOW, or select another model"
+        )
+    return budget
 
 
 @lru_cache

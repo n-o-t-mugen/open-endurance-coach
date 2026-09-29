@@ -8,10 +8,11 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
+from open_endurance_coach.chat.history import count_exchanges
 from open_endurance_coach.clients.intervals import IntervalsApiError
 from open_endurance_coach.clients.llm import LlmClient, LlmError, LlmMessage
 from open_endurance_coach.clients.protocols import IntervalsReadClient
-from open_endurance_coach.config import Settings
+from open_endurance_coach.config import Settings, effective_input_budget, resolved_input_room
 from open_endurance_coach.errors import InternalError
 from open_endurance_coach.extractors.budget import build_within_budget
 from open_endurance_coach.extractors.deep import DeepHistoricalExtractor, detect_deep_query
@@ -39,11 +40,7 @@ from open_endurance_coach.store.records import (
     DraftStatus,
     FeedbackWithReport,
 )
-from open_endurance_coach.tokens import (
-    CHARS_PER_TOKEN,
-    INPUT_TOKEN_CEILING,
-    estimate_text_tokens,
-)
+from open_endurance_coach.tokens import CHARS_PER_TOKEN, estimate_text_tokens
 from open_endurance_coach.writer.calendar import CalendarWriter
 from open_endurance_coach.writer.records import AppliedDecision, ApplyReport
 
@@ -250,11 +247,16 @@ class CoachEngine:
         history: list[LlmMessage] | None,
         *,
         system_tokens: int,
+        budget: int,
     ) -> list[LlmMessage] | None:
         if not history:
             return history
         remaining = max(
-            0, INPUT_TOKEN_CEILING - system_tokens - estimate_user_message_tokens(context)
+            0,
+            budget
+            - system_tokens
+            - estimate_user_message_tokens(context)
+            - estimate_text_tokens(CHAT_ONLY_FALLBACK),
         )
         kept: list[LlmMessage] = []
         total = 0
@@ -267,31 +269,43 @@ class CoachEngine:
         ordered = list(reversed(kept))
         while ordered and ordered[0].role == "assistant":
             ordered.pop(0)
-        if len(ordered) < len(history):
-            logger.warning(
-                "trimmed the conversation history from %d to %d turns for the context budget",
-                len(history),
-                len(ordered),
+        before = count_exchanges(history)
+        after = count_exchanges(ordered)
+        if after < before:
+            logger.info(
+                "trimmed the conversation history from %d to %d exchanges for the context budget",
+                before,
+                after,
             )
+        elif len(ordered) < len(history):
+            logger.info("trimmed the oldest messages from the conversation for the context budget")
         return ordered
 
-    @staticmethod
-    def _assert_within_ceiling(messages: list[LlmMessage]) -> None:
+    def _assert_within_ceiling(self, messages: list[LlmMessage]) -> None:
+        budget = effective_input_budget(self._settings)
         total = sum(estimate_text_tokens(message.content) for message in messages)
-        if total > INPUT_TOKEN_CEILING:
+        if total > budget:
+            soft = self._settings.llm_input_budget
+            advice = (
+                "raise LLM_INPUT_BUDGET"
+                if soft is not None and soft < resolved_input_room(self._settings)
+                else "select a model with a larger window"
+            )
             raise ValueError(
-                f"request too large: about {total} tokens; limit {INPUT_TOKEN_CEILING}"
+                f"request too large: about {total} tokens; the budget is {budget} for"
+                f" {self._settings.llm_model!r}; shorten the message or {advice}"
             )
 
     async def _run_llm(
         self, context: CoachContext, *, history: list[LlmMessage] | None = None
     ) -> DecisionReport:
         today = _today(context, self._settings)
+        budget = effective_input_budget(self._settings)
         system_tokens = estimate_text_tokens(system_prompt(self._settings))
         messages = build_messages(
             context,
             self._settings,
-            self._fit_history(context, history, system_tokens=system_tokens),
+            self._fit_history(context, history, system_tokens=system_tokens, budget=budget),
         )
         self._assert_within_ceiling(messages)
         validated: list[DecisionReport] = []
@@ -398,17 +412,43 @@ class CoachEngine:
     def today(self) -> date:
         return self._clock().date()
 
-    def focus_limit(self) -> int:
-        """Max tokens a single athlete message may occupy in a request.
+    def input_room(self) -> int:
+        """Tokens a request can spend on the conversation: message plus history.
 
-        Reserves the system prompt and the normal context data budget so
-        system + context + message stays under the request ceiling.
+        That is the derived input budget minus the parts that are never negotiable: the
+        system prompt, the reserved athlete-data budget and the prompt boilerplate. Raises
+        when the budget cannot cover them, rather than silently squeezing the athlete out.
         """
-        system_tokens = estimate_text_tokens(system_prompt(self._settings))
-        return max(
-            1,
-            INPUT_TOKEN_CEILING - system_tokens - DEFAULT_MAX_TOKENS - PROMPT_OVERHEAD_TOKENS,
-        )
+        return self._input_room_for(self._settings)
+
+    def _input_room_for(self, settings: Settings) -> int:
+        budget = effective_input_budget(settings)
+        system_tokens = estimate_text_tokens(system_prompt(settings))
+        room = budget - system_tokens - DEFAULT_MAX_TOKENS - PROMPT_OVERHEAD_TOKENS
+        if room < 1:
+            raise ValueError(
+                f"the input budget ({budget} tokens) is too small: the system prompt"
+                f" (~{system_tokens} tokens), the {DEFAULT_MAX_TOKENS}-token athlete-data"
+                f" reserve and {PROMPT_OVERHEAD_TOKENS} tokens of overhead leave no room"
+                " for the conversation; raise LLM_INPUT_BUDGET, lower LLM_MAX_TOKENS, or"
+                " select a model with a larger window"
+            )
+        return room
+
+    def focus_limit(self) -> int:
+        """Max tokens a single athlete message may occupy in a request."""
+        return self.input_room()
+
+    def history_budget(self) -> int:
+        """Tokens the in-session conversation may occupy.
+
+        The same room as the message: data and history share what is left after the system
+        prompt and the reserved data budget. It assumes the full data reserve and no current
+        message, so it is an upper bound: a very large message can make ``_fit_history`` trim
+        slightly earlier than this cap implies. ``_fit_history`` still trims to the exact
+        remainder per request, so this only bounds what the session keeps in memory.
+        """
+        return self.input_room()
 
     def check_focus(self, focus: str) -> None:
         """Reject a message too large to send, rather than truncating it silently."""
@@ -429,7 +469,9 @@ class CoachEngine:
     def select_llm(
         self, *, provider: str | None = None, model: str | None = None
     ) -> tuple[str, str]:
-        self._llm_client.select(provider=provider, model=model)
+        candidate = self._llm_client.preview(provider=provider, model=model)
+        self._input_room_for(candidate)
+        self._settings = self._llm_client.select(provider=provider, model=model)
         return self.llm_selection()
 
     def prune_history(

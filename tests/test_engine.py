@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from open_endurance_coach.clients.intervals import IntervalsApiError
 from open_endurance_coach.clients.llm import LlmClient, LlmError, LlmMessage
-from open_endurance_coach.config import Settings
+from open_endurance_coach.config import Settings, effective_input_budget
 from open_endurance_coach.engine.coach import (
     MAX_PLANNING_DAYS,
     PROMPT_OVERHEAD_TOKENS,
@@ -22,7 +22,12 @@ from open_endurance_coach.engine.coach import (
 )
 from open_endurance_coach.errors import InternalError
 from open_endurance_coach.extractors.standard import DEFAULT_MAX_TOKENS
-from open_endurance_coach.prompts.prompts import estimate_user_message_tokens, system_prompt
+from open_endurance_coach.prompts.prompts import (
+    CHAT_ONLY_FALLBACK,
+    build_messages,
+    estimate_user_message_tokens,
+    system_prompt,
+)
 from open_endurance_coach.schemas.context import CoachContext, TrainingWeek
 from open_endurance_coach.schemas.decisions import (
     CreateWorkout,
@@ -33,7 +38,7 @@ from open_endurance_coach.schemas.decisions import (
 from open_endurance_coach.schemas.intervals import Activity, ActivitySplit
 from open_endurance_coach.store.db import CoachStore
 from open_endurance_coach.store.records import DraftStatus
-from open_endurance_coach.tokens import CHARS_PER_TOKEN, INPUT_TOKEN_CEILING, estimate_text_tokens
+from open_endurance_coach.tokens import CHARS_PER_TOKEN, estimate_text_tokens
 from open_endurance_coach.writer.calendar import CalendarWriter
 
 from .fakes import (
@@ -380,12 +385,97 @@ def test_check_focus_rejects_messages_over_the_limit(settings: Settings, tmp_pat
 def test_focus_limit_leaves_room_for_the_context(settings: Settings, tmp_path: Path) -> None:
     engine = make_engine(settings, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
     system_tokens = estimate_text_tokens(system_prompt(settings))
-    assert system_tokens + engine.focus_limit() + DEFAULT_MAX_TOKENS <= INPUT_TOKEN_CEILING
+    assert system_tokens + engine.focus_limit() + DEFAULT_MAX_TOKENS <= effective_input_budget(
+        settings
+    )
 
 
 def test_focus_limit_allows_a_long_question(settings: Settings, tmp_path: Path) -> None:
     engine = make_engine(settings, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
     assert engine.focus_limit() >= 20_000
+
+
+def test_focus_limit_follows_the_selected_model(tmp_path: Path) -> None:
+    ovh = Settings(
+        intervals_api_key="k", deepseek_api_key="k", llm_input_budget=200_000, _env_file=None
+    )
+    llm = LlmClient(
+        ovh.model_copy(update={"llm_provider": "fake"}),
+        {"fake": FakeLlmProvider(), "deepseek": FakeLlmProvider()},
+        sleep=RecordingSleep(),
+    )
+    engine = CoachEngine(ovh, CoachStore(tmp_path / "coach.db"), make_intervals_client(), llm)
+    ovh_limit = engine.focus_limit()
+    engine.select_llm(provider="deepseek")
+    assert engine.focus_limit() > ovh_limit
+
+
+def test_history_budget_follows_the_selected_model(tmp_path: Path) -> None:
+    ovh = Settings(
+        intervals_api_key="k", deepseek_api_key="k", llm_input_budget=200_000, _env_file=None
+    )
+    llm = LlmClient(
+        ovh.model_copy(update={"llm_provider": "fake"}),
+        {"fake": FakeLlmProvider(), "deepseek": FakeLlmProvider()},
+        sleep=RecordingSleep(),
+    )
+    engine = CoachEngine(ovh, CoachStore(tmp_path / "coach.db"), make_intervals_client(), llm)
+    ovh_budget = engine.history_budget()
+    engine.select_llm(provider="deepseek")
+    assert engine.history_budget() > ovh_budget
+
+
+def test_history_budget_matches_focus_limit(settings: Settings, tmp_path: Path) -> None:
+    engine = make_engine(settings, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
+    assert engine.history_budget() == engine.focus_limit()
+
+
+def test_a_budget_too_small_to_chat_is_reported(settings: Settings, tmp_path: Path) -> None:
+    tiny = settings.model_copy(update={"llm_input_budget": 5000})
+    engine = make_engine(tiny, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
+    with pytest.raises(ValueError, match="too small"):
+        engine.focus_limit()
+    with pytest.raises(ValueError, match="too small"):
+        engine.history_budget()
+
+
+def test_select_llm_rejects_an_unknown_model_without_switching(tmp_path: Path) -> None:
+    settings = Settings(intervals_api_key="k", deepseek_api_key="k", _env_file=None)
+    llm = LlmClient(
+        settings.model_copy(update={"llm_provider": "fake", "llm_model": "fake-model"}),
+        {"fake": FakeLlmProvider()},
+        sleep=RecordingSleep(),
+    )
+    engine = CoachEngine(settings, CoachStore(tmp_path / "coach.db"), make_intervals_client(), llm)
+    with pytest.raises(ValueError, match="LLM_CONTEXT_WINDOW"):
+        engine.select_llm(model="custom-model")
+    assert engine.llm_selection() == ("fake", "fake-model")
+
+
+def test_unknown_model_fails_for_the_budget(tmp_path: Path) -> None:
+    settings = Settings(intervals_api_key="k", llm_model="custom-model", _env_file=None)
+    engine = make_engine(settings, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
+    with pytest.raises(ValueError, match="LLM_CONTEXT_WINDOW"):
+        engine.focus_limit()
+
+
+def test_history_trimming_reserves_the_fallback_message(settings: Settings, tmp_path: Path) -> None:
+    engine = make_engine(settings, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
+    context = CoachContext(focus="status", max_tokens=8192)
+    budget = effective_input_budget(settings)
+    turn = "h" * 6000
+    turns = budget // estimate_text_tokens(turn) + 5
+    history = [LlmMessage(role="user", content=turn) for _ in range(turns)]
+    system_tokens = estimate_text_tokens(system_prompt(settings))
+    trimmed = engine._fit_history(context, history, system_tokens=system_tokens, budget=budget)
+    assert trimmed is not None
+    assert len(trimmed) < len(history)
+    fallback = [
+        *build_messages(context, settings, trimmed),
+        LlmMessage(role="user", content=CHAT_ONLY_FALLBACK),
+    ]
+    total = sum(estimate_text_tokens(message.content) for message in fallback)
+    assert total <= budget
 
 
 def test_prompt_overhead_reserve_covers_the_rendered_message(settings: Settings) -> None:
@@ -398,7 +488,9 @@ def test_request_ceiling_guard_rejects_an_oversized_request(
     settings: Settings, tmp_path: Path
 ) -> None:
     engine = make_engine(settings, CoachStore(tmp_path / "coach.db"), FakeLlmProvider())
-    oversized = LlmMessage(role="user", content="x" * ((INPUT_TOKEN_CEILING + 1) * CHARS_PER_TOKEN))
+    oversized = LlmMessage(
+        role="user", content="x" * ((effective_input_budget(settings) + 1) * CHARS_PER_TOKEN)
+    )
     with pytest.raises(ValueError, match="request too large"):
         engine._assert_within_ceiling([oversized])
 
@@ -767,7 +859,9 @@ def test_engine_llm_selection_and_switch(settings: Settings, tmp_path: Path) -> 
     assert engine.llm_selection() == ("fake", "fake-model")
     assert engine.select_llm(provider="deepseek") == ("deepseek", "deepseek-flash")
     assert engine.llm_selection() == ("deepseek", "deepseek-flash")
-    assert engine.select_llm(model="custom-model") == ("deepseek", "custom-model")
+    with pytest.raises(ValueError, match="LLM_CONTEXT_WINDOW"):
+        engine.select_llm(model="custom-model")
+    assert engine.llm_selection() == ("deepseek", "deepseek-flash")
     store.close()
 
 
@@ -1176,8 +1270,9 @@ async def test_history_is_trimmed_to_the_context_budget(settings: Settings, tmp_
     store = CoachStore(tmp_path / "coach.db")
     provider = FakeLlmProvider([completion(report_json("ok"))])
     engine = make_engine(settings, store, provider)
+    over_budget = effective_input_budget(settings) * CHARS_PER_TOKEN
     history = [
-        LlmMessage(role="user", content="zzzzzzzz" + "z" * (INPUT_TOKEN_CEILING * CHARS_PER_TOKEN)),
+        LlmMessage(role="user", content="zzzzzzzz" + "z" * over_budget),
         LlmMessage(role="assistant", content="short answer"),
         LlmMessage(role="user", content="recent question"),
     ]
@@ -1193,11 +1288,10 @@ async def test_history_trimming_keeps_the_newest_turns(settings: Settings, tmp_p
     store = CoachStore(tmp_path / "coach.db")
     provider = FakeLlmProvider([completion(report_json("ok"))])
     engine = make_engine(settings, store, provider)
+    over_budget = effective_input_budget(settings) * CHARS_PER_TOKEN
     history = [
-        LlmMessage(role="user", content="oldest " + "x" * (INPUT_TOKEN_CEILING * CHARS_PER_TOKEN)),
-        LlmMessage(
-            role="assistant", content="old answer " + "y" * (INPUT_TOKEN_CEILING * CHARS_PER_TOKEN)
-        ),
+        LlmMessage(role="user", content="oldest " + "x" * over_budget),
+        LlmMessage(role="assistant", content="old answer " + "y" * over_budget),
         LlmMessage(role="user", content="newest question"),
     ]
     await engine.analyze(
@@ -1216,13 +1310,39 @@ async def test_full_history_drop_is_logged(
     provider = FakeLlmProvider([completion(report_json("ok"))])
     engine = make_engine(settings, store, provider)
     history = [
-        LlmMessage(role="user", content="x" * ((INPUT_TOKEN_CEILING + 1024) * CHARS_PER_TOKEN))
+        LlmMessage(role="user", content="old question"),
+        LlmMessage(
+            role="assistant",
+            content="x" * ((effective_input_budget(settings) + 1024) * CHARS_PER_TOKEN),
+        ),
     ]
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         await engine.analyze(
             "status", context=CoachContext(focus="status", max_tokens=200), history=history
         )
     assert "trimmed the conversation history" in caplog.text
+
+
+async def test_user_only_history_trim_is_logged(
+    settings: Settings, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    engine = make_engine(
+        settings,
+        CoachStore(tmp_path / "coach.db"),
+        FakeLlmProvider([completion(report_json("ok"))]),
+    )
+    history = [
+        LlmMessage(
+            role="user", content="x" * ((effective_input_budget(settings) + 1024) * CHARS_PER_TOKEN)
+        ),
+        LlmMessage(role="user", content="recent question"),
+        LlmMessage(role="assistant", content="recent answer"),
+    ]
+    with caplog.at_level("INFO"):
+        await engine.analyze(
+            "status", context=CoachContext(focus="status", max_tokens=200), history=history
+        )
+    assert "trimmed the oldest messages" in caplog.text
 
 
 def test_validate_report_rejects_placeholder_workout_duration() -> None:
@@ -1348,7 +1468,7 @@ async def test_total_prompt_stays_under_the_input_ceiling(
     await engine.analyze("status", context=context, history=history)
     messages = provider.calls[0]["messages"]
     total = sum(estimate_text_tokens(message.content) for message in messages)
-    assert total <= INPUT_TOKEN_CEILING
+    assert total <= effective_input_budget(settings)
     assert total > estimate_text_tokens(system_prompt(settings))
 
 

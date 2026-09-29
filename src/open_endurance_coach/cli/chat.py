@@ -22,6 +22,7 @@ from open_endurance_coach.chat.gate import (
     is_exit_command,
 )
 from open_endurance_coach.chat.history import ChatSession, assistant_turn
+from open_endurance_coach.chat.memory import update_memory
 from open_endurance_coach.chat.state import ChatState
 from open_endurance_coach.cli.confirmation import Done, prompt_plan, respond
 from open_endurance_coach.cli.rendering import (
@@ -90,7 +91,9 @@ def _needs_fresh_context(focus: str, today: date | None) -> bool:
     return _REFRESH_RE.search(focus) is not None
 
 
-def _handle_llm_command(engine: CoachEngine, name: str, args: list[str]) -> None:
+def _handle_llm_command(
+    engine: CoachEngine, name: str, args: list[str], session: ChatSession
+) -> None:
     try:
         if args:
             if name == "provider":
@@ -99,6 +102,7 @@ def _handle_llm_command(engine: CoachEngine, name: str, args: list[str]) -> None
                 provider, model = engine.select_llm(model=args[0])
         else:
             provider, model = engine.llm_selection()
+        session.cap = engine.history_budget()
         console.print(f"[meta]Using {escape(provider)} ({escape(model)}).[/meta]")
     except RECOVERABLE_EXCEPTIONS as exc:
         print_error(exc)
@@ -266,7 +270,7 @@ async def _handle_proposal(
         elif name == "forget":
             console.print("[warn]/forget is unavailable while a proposal is open.[/warn]")
         elif name in {"provider", "model"}:
-            _handle_llm_command(engine, name, parts[1:])
+            _handle_llm_command(engine, name, parts[1:], session)
         else:
             console.print("[error]Unknown command.[/error]")
             console.print(HELP_TEXT, markup=False)
@@ -338,17 +342,26 @@ async def _run_command(
         if days is None:
             session.history = []
             session.context = None
+            session.notified.clear()
         scope = "all history" if days is None else f"history older than {days} days"
         console.print(f"Forgot {sum(removed.values())} records ({scope}).")
         return None
     if name in {"provider", "model"}:
-        _handle_llm_command(engine, name, args)
+        _handle_llm_command(engine, name, args, session)
         return None
     return None
 
 
+def _report_memory(engine: CoachEngine, session: ChatSession) -> None:
+    """Warn as the conversation fills, then relieve it when it is nearly full."""
+    report = update_memory(session.history, cap=engine.history_budget(), notified=session.notified)
+    for notice in report.notices:
+        console.print(f"[meta]{escape(notice)}[/meta]")
+
+
 async def run_chat(engine: CoachEngine, settings: Settings) -> None:
-    session = ChatSession(cap=settings.chat_history_max_tokens)
+    cap = engine.history_budget()
+    session = ChatSession(cap=cap)
     if settings.history_days > 0:
         removed = engine.prune_history(settings.history_days)
         total = sum(removed.values())
@@ -371,15 +384,12 @@ async def run_chat(engine: CoachEngine, settings: Settings) -> None:
             settings.chat_history_turns,
             max_age_days=settings.chat_history_max_age_days,
         ),
-        max_tokens=settings.chat_history_max_tokens,
+        max_tokens=cap,
     )
     state = ChatState()
-    remembered = sum(1 for turn in session.history if turn.role == "user")
     provider, model = engine.llm_selection()
     console.print("Chat with the coach. /help lists commands.")
     console.print(f"[meta]Using {escape(provider)} ({escape(model)}).[/meta]")
-    if remembered:
-        console.print(f"[meta]Remembering {remembered} past exchanges.[/meta]")
     while True:
         console.print()
         try:
@@ -423,6 +433,7 @@ async def run_chat(engine: CoachEngine, settings: Settings) -> None:
                     state = step
                 case Command(name=name, args=args):
                     state = await _run_command(engine, name, args, session) or state
+            _report_memory(engine, session)
         except InternalError:
             raise
         except Exception as exc:

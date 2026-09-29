@@ -13,12 +13,13 @@ from open_endurance_coach.chat.history import ChatSession
 from open_endurance_coach.cli import chat as cli_chat
 from open_endurance_coach.cli import main as cli_main
 from open_endurance_coach.clients.llm import LlmClient
-from open_endurance_coach.config import Settings
+from open_endurance_coach.config import Settings, effective_input_budget
 from open_endurance_coach.engine.coach import CoachEngine
 from open_endurance_coach.schemas.context import CoachContext
 from open_endurance_coach.schemas.decisions import DecisionReport
 from open_endurance_coach.store.db import CoachStore
 from open_endurance_coach.store.records import DraftStatus
+from open_endurance_coach.tokens import CHARS_PER_TOKEN
 from open_endurance_coach.writer.calendar import WriterError
 
 from .fakes import (
@@ -162,6 +163,7 @@ def test_chat_provider_command_switches_and_next_analysis_uses_it(
 def test_chat_model_command_sets_model(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, tmp_path: Path
 ) -> None:
+    settings = settings.model_copy(update={"llm_context_window": 100_000})
     fake = FakeLlmProvider([completion(report_json())])
     llm = LlmClient(
         settings.model_copy(update={"llm_provider": "fake"}),
@@ -171,10 +173,19 @@ def test_chat_model_command_sets_model(
     engine = CoachEngine(settings, store, make_intervals_client(), llm)
     monkeypatch.setattr(cli_main, "_with_engine", FakeRunner(engine))
     monkeypatch.setattr(cli_main, "get_settings", lambda: settings)
+    captured: dict[str, Any] = {}
+
+    class _RecordingSession(ChatSession):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            captured["cap"] = self.cap
+
+    monkeypatch.setattr(cli_chat, "ChatSession", _RecordingSession)
     result = runner.invoke(cli_main.app, [], input="/model my-model\nanalyze my week\n/exit\n")
     assert result.exit_code == 0
     assert "Using fake (my-model)." in result.output
     assert fake.calls[-1]["model"] == "my-model"
+    assert captured["cap"] == engine.history_budget()
     store.close()
 
 
@@ -565,12 +576,12 @@ def test_chat_startup_keeps_history_when_window_is_zero(
     )
     result = runner.invoke(cli_main.app, [], input="how was my week?\n")
     assert result.exit_code == 0
-    assert "Remembering 1 past exchange" in result.output
     assert "Pruned" not in result.output
+    assert "legs heavy" in provider.calls[0]["messages"][1].content
 
 
-def test_chat_shows_seeded_memory_count(patched: Any) -> None:
-    provider = FakeLlmProvider([completion(report_json()), completion(report_json())])
+def test_chat_does_not_announce_seeded_memory(patched: Any) -> None:
+    provider = FakeLlmProvider([completion(report_json())])
     _, store = patched(provider)
     draft_id = store.save_draft(
         focus="f",
@@ -578,10 +589,30 @@ def test_chat_shows_seeded_memory_count(patched: Any) -> None:
         context=CoachContext(focus="f"),
     )
     store.add_feedback(draft_id, "legs heavy")
-    store.add_feedback(draft_id, "slept badly")
-    result = runner.invoke(cli_main.app, [], input="how was my week?\nand today?\n")
+    result = runner.invoke(cli_main.app, [], input="/exit\n")
     assert result.exit_code == 0
-    assert "Remembering 2 past exchanges." in result.output
+    assert "Remembering" not in result.output
+
+
+def test_chat_warns_when_memory_is_filling(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, tmp_path: Path
+) -> None:
+    budget = 30_000
+    transcript_chars = 24_000
+    settings = settings.model_copy(update={"llm_input_budget": budget})
+    provider = FakeLlmProvider([completion(report_json())])
+    engine, store = make_engine(settings, tmp_path, provider)
+    draft_id = store.save_draft(
+        focus="f",
+        report=DecisionReport.model_validate(json.loads(report_json())),
+        context=CoachContext(focus="f"),
+    )
+    store.add_feedback(draft_id, "x" * transcript_chars)
+    monkeypatch.setattr(cli_main, "_with_engine", FakeRunner(engine))
+    monkeypatch.setattr(cli_main, "get_settings", lambda: settings)
+    result = runner.invoke(cli_main.app, [], input="how was my week?\n/exit\n")
+    assert result.exit_code == 0
+    assert "conversation memory" in result.output
 
 
 def test_chat_forget_wipes_stored_history_and_memory(patched: Any) -> None:
@@ -598,25 +629,21 @@ def test_chat_forget_wipes_stored_history_and_memory(patched: Any) -> None:
     assert drafts[0].focus.startswith("third")
 
 
-def test_chat_session_trims_to_cap(
-    patched: Any, monkeypatch: pytest.MonkeyPatch, settings: Settings
+def test_chat_session_cap_comes_from_the_budget(
+    patched: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = FakeLlmProvider([completion(report_json()) for _ in range(4)])
-    patched(provider)
-    monkeypatch.setattr(
-        cli_main,
-        "get_settings",
-        lambda: settings.model_copy(update={"chat_history_max_tokens": 100}),
-    )
-    result = runner.invoke(
-        cli_main.app,
-        [],
-        input=f"how was my week?\n{'A' * 4000}\n{'B' * 4000}\n{'C' * 4000}\n",
-    )
+    engine, _ = patched(FakeLlmProvider())
+    captured: dict[str, Any] = {}
+
+    class _RecordingSession(ChatSession):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            captured["cap"] = self.cap
+
+    monkeypatch.setattr(cli_chat, "ChatSession", _RecordingSession)
+    result = runner.invoke(cli_main.app, [], input="/exit\n")
     assert result.exit_code == 0
-    prompt = provider.calls[3]["messages"][1].content
-    assert "Recent conversation:" in prompt
-    assert "A" * 4000 not in prompt
+    assert captured["cap"] == engine.history_budget()
 
 
 def test_chat_shows_thinking_indicator(patched: Any) -> None:
@@ -1684,10 +1711,13 @@ def test_chat_race_delete_is_gated_and_written(patched: Any) -> None:
     assert calendar.deleted == ["136701474"]
 
 
-def test_chat_rejects_an_over_long_message_without_calling_the_llm(patched: Any) -> None:
+def test_chat_rejects_an_over_long_message_without_calling_the_llm(
+    patched: Any, settings: Settings
+) -> None:
     provider = FakeLlmProvider()
     patched(provider)
-    result = runner.invoke(cli_main.app, [], input=("x" * 100000) + "\n/exit\n")
+    over = "x" * ((effective_input_budget(settings) + 100) * CHARS_PER_TOKEN)
+    result = runner.invoke(cli_main.app, [], input=over + "\n/exit\n")
     assert result.exit_code == 0
     assert "message too long" in result.output
     assert provider.calls == []
