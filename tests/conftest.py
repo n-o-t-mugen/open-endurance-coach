@@ -11,4 +11,5 @@ def settings() -> Settings:
         deepseek_api_key="test-llm-key",
         requests_per_second=100000.0,
         retry_base_delay=0.0,
+        _env_file=None,
     )
