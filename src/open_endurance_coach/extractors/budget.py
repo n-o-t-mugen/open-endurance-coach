@@ -10,8 +10,27 @@ from open_endurance_coach.schemas.intervals import (
     SportSettings,
     Wellness,
 )
+from open_endurance_coach.tokens import CHARS_PER_TOKEN
 
 RECENT_ACTIVITY_KEEP_DAYS = 7
+
+
+def _trim_furthest_goal_race_description(ctx: CoachContext, max_tokens: int) -> None:
+    """Free tokens by trimming the furthest race description, keeping the actionable head.
+
+    Only called when that race still has a description; empties it to ``None`` once the
+    needed cut reaches its length, so the next pass can drop the whole race if required.
+    """
+    furthest = ctx.goal_races[-1]
+    description = furthest.description or ""
+    overshoot = max(1, ctx.data_tokens() - max_tokens)
+    cut = max(1, overshoot * CHARS_PER_TOKEN)
+    if cut >= len(description):
+        ctx.goal_races[-1] = furthest.model_copy(update={"description": None})
+    else:
+        ctx.goal_races[-1] = furthest.model_copy(
+            update={"description": description[:-cut], "description_truncated": True}
+        )
 
 
 def _activity_droppable(activities: list[Activity], today: date | None) -> bool:
@@ -92,6 +111,8 @@ def build_within_budget(
             ctx.current_proposal = None
         elif ctx.user_feedback is not None:
             ctx.user_feedback = None
+        elif ctx.goal_races and ctx.goal_races[-1].description:
+            _trim_furthest_goal_race_description(ctx, max_tokens)
         elif ctx.goal_races:
             ctx.goal_races.pop()
         elif ctx.recent_activities:
