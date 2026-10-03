@@ -118,6 +118,8 @@ class GoalRace(BaseModel):
     phase: MacroPhase
     moving_time: int | None = None
     distance: float | None = None
+    description: str | None = None
+    description_truncated: bool | None = None
     icu_training_load: float | None = None
 
 

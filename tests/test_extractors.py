@@ -648,6 +648,7 @@ async def test_standard_extraction_builds_goal_races(settings: Settings) -> None
                 "moving_time": 5400,
                 "distance": 21097.5,
                 "icu_training_load": 150,
+                "description": "Flat and fast: target 1:30, hold Z3.",
             },
             {
                 "id": 90002,
@@ -655,6 +656,7 @@ async def test_standard_extraction_builds_goal_races(settings: Settings) -> None
                 "start_date_local": "2024-02-08T00:00:00",
                 "category": "RACE_B",
                 "type": "Ride",
+                "description": "Circuit race, 1.2 km lap, target 60 min.",
             },
             {
                 "id": 90003,
@@ -675,12 +677,14 @@ async def test_standard_extraction_builds_goal_races(settings: Settings) -> None
     assert nearest.days_to_race == 7
     assert nearest.weeks_to_race == 1
     assert nearest.phase == "Taper"
+    assert nearest.description == "Circuit race, 1.2 km lap, target 60 min."
     assert furthest.days_to_race == 29
     assert furthest.weeks_to_race == 5
     assert furthest.phase == "Build"
     assert furthest.distance == 21097.5
     assert furthest.moving_time == 5400
     assert furthest.icu_training_load == 150
+    assert furthest.description == "Flat and fast: target 1:30, hold Z3."
 
 
 @pytest.mark.parametrize(
@@ -841,6 +845,75 @@ def test_budget_keeps_goal_races_while_other_sections_are_trimmed() -> None:
     assert [item.name for item in context.goal_races] == ["Autumn Trail Race"]
     assert context.recent_activities == []
     assert context.wellness == []
+
+
+def _goal_race(event_id: int, day: date, *, description: str | None) -> GoalRace:
+    return GoalRace(
+        event_id=event_id,
+        name=f"Race {event_id}",
+        date=day,
+        category="RACE_B",
+        days_to_race=(day - TODAY).days,
+        weeks_to_race=1,
+        phase="Build",
+        description=description,
+    )
+
+
+def _budget_for(races: list[GoalRace], *, overshoot: int) -> CoachContext:
+    base = CoachContext(focus="f", goal_races=races, today=TODAY)
+    return build_within_budget(
+        focus="f",
+        recent_activities=[],
+        wellness=[],
+        upcoming_events=[],
+        sport_settings=[],
+        goal_races=races,
+        user_feedback=None,
+        activity_detail=None,
+        max_tokens=base.data_tokens() - overshoot,
+        today=TODAY,
+    )
+
+
+def test_budget_trims_the_furthest_goal_race_description_before_dropping_it() -> None:
+    near = _goal_race(1, date(2024, 2, 10), description="NEAR " * 200)
+    far = _goal_race(2, date(2024, 2, 20), description="FAR " * 200)
+    assert far.description is not None
+    context = _budget_for([near, far], overshoot=20)
+    assert [race.event_id for race in context.goal_races] == [1, 2]
+    nearest, furthest = context.goal_races
+    assert furthest.description is not None
+    assert furthest.description != far.description
+    assert far.description.startswith(furthest.description)
+    assert furthest.description_truncated is True
+    assert nearest.description == near.description
+    assert nearest.description_truncated is None
+    assert context.data_tokens() <= context.max_tokens
+
+
+def test_budget_drops_the_furthest_goal_race_when_its_description_cannot_free_enough() -> None:
+    near = _goal_race(1, date(2024, 2, 10), description=None)
+    far = _goal_race(2, date(2024, 2, 20), description="x")
+    context = _budget_for([near, far], overshoot=30)
+    assert [race.event_id for race in context.goal_races] == [1]
+
+
+def test_budget_leaves_a_goal_race_description_untouched_within_budget() -> None:
+    race = _goal_race(1, date(2024, 2, 10), description="Full plan " * 100)
+    context = _budget_for([race], overshoot=0)
+    assert context.goal_races[0].description == race.description
+    assert context.goal_races[0].description_truncated is None
+
+
+def test_budget_terminates_with_many_large_goal_race_descriptions() -> None:
+    races = [
+        _goal_race(index, date(2024, 2, 10) + timedelta(days=index), description="P" * 2000)
+        for index in range(5)
+    ]
+    base = CoachContext(focus="f", goal_races=races, today=TODAY)
+    context = _budget_for(races, overshoot=base.data_tokens() // 2)
+    assert context.data_tokens() <= context.max_tokens
 
 
 async def test_deep_extraction_carries_goal_races_and_rollup(settings: Settings) -> None:

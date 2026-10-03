@@ -300,6 +300,27 @@ def test_goal_races_serialize_into_sections() -> None:
     assert context.section_tokens()["goal_races"] > 0
 
 
+def test_goal_race_truncation_flag_is_omitted_unless_set() -> None:
+    base = {
+        "event_id": 90001,
+        "name": "Spring Half",
+        "date": "2024-03-01",
+        "category": "RACE_A",
+        "type": "Run",
+        "days_to_race": 29,
+        "weeks_to_race": 5,
+        "phase": "Build",
+        "description": "target 1:30",
+    }
+    intact = CoachContext.model_validate({"focus": "x", "goal_races": [base]})
+    assert "description_truncated" not in intact.sections()["goal_races"][0]
+
+    trimmed = CoachContext.model_validate(
+        {"focus": "x", "goal_races": [{**base, "description_truncated": True}]}
+    )
+    assert trimmed.sections()["goal_races"][0]["description_truncated"] is True
+
+
 def test_goal_race_rejects_unknown_category_and_extras() -> None:
     base = {
         "name": "Spring Half",
