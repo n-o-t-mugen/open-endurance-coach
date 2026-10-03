@@ -14622,6 +14622,18 @@
             "type": "integer",
             "format": "int32"
           },
+          "target": {
+            "type": "number",
+            "format": "float"
+          },
+          "max_cv_percent": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "tolerance_percent": {
+            "type": "integer",
+            "format": "int32"
+          },
           "rpe": {
             "type": "integer",
             "format": "int32"
