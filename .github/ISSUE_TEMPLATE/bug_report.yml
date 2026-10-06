@@ -1,0 +1,75 @@
+name: Bug report
+description: Report behaviour that does not match the documentation or the expected behaviour
+title: ""
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        - **Search [existing issues](https://github.com/yannvillellas/open-endurance-coach/issues)** (open and closed) before opening a new one. One issue per bug.
+        - **Never paste secrets or personal data**: no API keys, no `.env` contents, no athlete health data, no private activity names. Redact logs.
+        - Security problems do **not** belong in a public issue — report them privately via [Security advisories](https://github.com/yannvillellas/open-endurance-coach/security/advisories/new).
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checklist
+      options:
+        - label: I have searched the existing issues and this report is not a duplicate
+          required: true
+        - label: This report contains no secrets or personal data
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what is wrong.
+      placeholder: What happened? What did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce it, as minimally and precisely as possible?
+      placeholder: |
+        1. Run `coach`
+        2. Type ...
+        3. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Actual behaviour and logs
+      description: What happened instead? Paste the relevant output, redacted.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Where did it happen?
+      value: |
+        - OS:
+        - Python:
+        - Provider / model:
+        - Commit or version:
+    validations:
+      required: true
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else that helps (screenshots, links, related issues).
+    validations:
+      required: false
