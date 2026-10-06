@@ -10162,6 +10162,10 @@
             "type": "integer",
             "format": "int32"
           },
+          "floorsClimbed": {
+            "type": "integer",
+            "format": "int32"
+          },
           "respiration": {
             "type": "number",
             "format": "float"
