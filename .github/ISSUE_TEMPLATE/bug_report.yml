@@ -1,6 +1,5 @@
 name: Bug report
 description: Report behaviour that does not match the documentation or the expected behaviour
-title: ""
 labels: ["bug"]
 body:
   - type: markdown
