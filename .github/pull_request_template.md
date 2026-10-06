@@ -1,6 +1,6 @@
 # Pull request
 
-<!-- Thanks for contributing! -->
+<!-- Thanks for contributing! See CONTRIBUTING.md. -->
 
 ## Summary
 
