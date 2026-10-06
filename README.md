@@ -6,7 +6,7 @@ Open Endurance Coach integrates multi-sport telemetry from Intervals.icu with La
 
 ## Current Capabilities
 
-- **Data Extraction:** Standard scope (recent activities, wellness, upcoming events, sport settings, goal races over a 120-day horizon with macro phase anchors, and a 90-day weekly training rollup with CTL/ATL/ramp and per-sport load) and deep-historical scope (trend queries such as "heart rate improvement on hills over the last 3 months"), which carries the same goal-race and rollup context so a trend answer can be tied back to the race being trained for. Both are budgeted to fit the model's token limit.
+- **Data Extraction:** Standard scope (recent activities, a ±14-day calendar window split into recent and upcoming events, wellness, sport settings, goal races over a 120-day horizon with macro phase anchors, and a 90-day weekly training rollup with CTL/ATL/ramp and per-sport load) and deep-historical scope (trend queries such as "heart rate improvement on hills over the last 3 months"), which carries the same goal-race and rollup context so a trend answer can be tied back to the race being trained for and pins the referenced window (±3 days) so evidence survives context trimming. Both are budgeted to fit the model's token limit.
 - **Analysis:** OVHcloud AI Endpoints' free tier (Qwen3.5-397B-A17B, JSON mode, thinking enabled; no API key) — or DeepSeek — enforces Joe Friel's periodization principles and Dr. Andrew Coggan's power analytics, comparing executed training against planned targets and current readiness (CTL/ATL, HRV, sleep).
 - **Draft & Review Loop:** Every analysis produces a validated draft under a strict schema — invalid LLM output is retried, then rejected. The coach asks for anything material it is missing (availability, constraints, injury, RPE, race details) and re-analyzes with your answer before anything can be approved.
 - **Race-Aware Planning:** With a goal race in the calendar the coach plans backwards from it — states the macro phases (Base, Build, Peak, Taper) with weekly load targets, then proposes concrete workouts for the next 7–14 days. Races are first-class events (`RACE_A/B/C`) it can create or adjust; missing race details (distance, climbing, expected load) are asked for, never estimated.
@@ -90,11 +90,13 @@ Available providers:
 
 ## Safety model
 
-Changes reach Intervals.icu only after: strict schema validation (`extra="forbid"`), a pending-only approval, and a proposal gate restating the exact plan that requires a literal `yes`. The writer resolves creates by name+date (no duplicates; race matches span any `RACE_*` priority) and refuses to update or delete anything outside the mutation's own family (workout → `WORKOUT` only, race → `RACE_*` only).
+Changes reach Intervals.icu only after: strict schema validation (`extra="forbid"`), a pending-only approval, and a proposal gate restating the exact plan that requires a literal `yes`. The writer resolves creates by name+date (no duplicates; race matches span any `RACE_*` priority) and refuses to update or delete anything outside the mutation's own family (workout → `WORKOUT` only, race → `RACE_*` only). No personal data is ever committed: `ATHLETE_PROFILE` lives only in `.env`, and no personal details belong in public docs, code, fixtures or issues.
 
 ## Coaching Methodology
 
 The system is engineered to act as an elite endurance coach enforcing Joe Friel's periodization principles and Dr. Andrew Coggan's power analytics. It prioritizes objective execution validation and autonomous fatigue modulation over generic encouragement.
+
+The decision loop is explicit and ordered: validate planned against executed, solicit and inject the athlete's qualitative context (RPE, fatigue, schedule constraints) before finalizing, modulate the upcoming load, then generate the structural changes. User context is always injected before any calendar update.
 
 ## Initial Setup Requirements
 
