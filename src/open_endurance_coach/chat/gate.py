@@ -74,7 +74,10 @@ def _selector_matches(token: str, items: tuple[PlanItem, ...]) -> set[int] | Non
     if token.isdigit():
         if not token.isascii():
             return set()
-        number = int(token)
+        try:
+            number = int(token)
+        except ValueError:
+            return set()
         return {number - 1} if 1 <= number <= len(items) else set()
     weekday = next(
         (day for day, name in enumerate(_WEEKDAYS) if len(token) >= 3 and name.startswith(token)),
