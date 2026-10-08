@@ -72,6 +72,8 @@ def is_exit_command(line: str) -> bool:
 def _selector_matches(token: str, items: tuple[PlanItem, ...]) -> set[int] | None:
     """Item positions (0-based) a selector picks, or None when it is not a selector."""
     if token.isdigit():
+        if not token.isascii():
+            return set()
         number = int(token)
         return {number - 1} if 1 <= number <= len(items) else set()
     weekday = next(
