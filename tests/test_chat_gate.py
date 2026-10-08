@@ -92,6 +92,11 @@ def test_a_selection_matching_nothing_never_proceeds(line: str) -> None:
     assert isinstance(handle(line, ITEMS), InvalidSelection)
 
 
+@pytest.mark.parametrize("line", ["yes ²", "yes ①", "yes ٣", "yes 1 ²"])
+def test_a_non_ascii_digit_never_proceeds(line: str) -> None:
+    assert isinstance(handle(line, ITEMS), InvalidSelection)
+
+
 def test_excluding_every_item_never_proceeds() -> None:
     result = handle("yes except 1 thursday 4", ITEMS)
     assert isinstance(result, InvalidSelection)
