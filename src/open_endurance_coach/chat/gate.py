@@ -99,8 +99,11 @@ def _select(key: str, snapshot: PlanSnapshot) -> ConfirmationResult | None:
     if match is None:
         return None
     items = snapshot.items
+    tokens = [token for token in _SELECTOR_SPLIT_RE.split(match.group(2)) if token]
+    if not tokens:
+        return InvalidSelection("No items were given.")
     picked: set[int] = set()
-    for token in _SELECTOR_SPLIT_RE.split(match.group(2)):
+    for token in tokens:
         matches = _selector_matches(token, items)
         if matches is None:
             return None

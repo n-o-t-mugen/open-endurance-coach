@@ -73,6 +73,10 @@ def test_fuzzy_yes_with_items_is_still_feedback(line: str) -> None:
         ("yes except Thursday", (1, 2)),
         ("Yes except thu, 4", (2,)),
         ("yes except 2026-10-08", (1, 2)),
+        ("yes 1,,3", (2, 3)),
+        ("yes 1,", (2,)),
+        ("yes ,1", (2,)),
+        ("yes except 1,", (0, 1, 3)),
     ],
 )
 def test_yes_with_a_selection_approves_a_subset(line: str, indices: tuple[int, ...]) -> None:
@@ -104,6 +108,11 @@ def test_excluding_every_item_never_proceeds() -> None:
 
 def test_a_selection_without_items_never_proceeds() -> None:
     assert isinstance(handle("yes except 1", APPROVE), InvalidSelection)
+
+
+@pytest.mark.parametrize("line", ["yes ,", "yes ,,", "yes except ,", "yes except ,,"])
+def test_a_selection_with_only_empty_tokens_never_proceeds(line: str) -> None:
+    assert isinstance(handle(line, ITEMS), InvalidSelection)
 
 
 def test_plain_yes_with_items_still_approves_everything() -> None:
